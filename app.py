@@ -23,6 +23,32 @@ st.set_page_config(
 
 
 # ============================================================
+# GEMINI API KEY CONFIGURATION
+# ============================================================
+
+def configure_api_key():
+    """
+    Load the Gemini API key from Streamlit Cloud secrets.
+
+    If no Streamlit secret is configured, use the existing
+    environment variable. This keeps local development working.
+    """
+
+    try:
+        api_key = st.secrets.get("GEMINI_API_KEY")
+    except (FileNotFoundError, KeyError):
+        api_key = None
+
+    if api_key:
+        os.environ["GEMINI_API_KEY"] = str(api_key)
+
+    return bool(os.environ.get("GEMINI_API_KEY"))
+
+
+API_KEY_AVAILABLE = configure_api_key()
+
+
+# ============================================================
 # CUSTOM STYLING
 # ============================================================
 
@@ -74,14 +100,8 @@ def get_dataset_id(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
-def format_dataframe(df):
-    """Return a copy suitable for display."""
-
-    return df.copy()
-
-
 def get_missing_percentage(df):
-    """Calculate overall missing-value percentage."""
+    """Calculate the percentage of missing dataset cells."""
 
     total_cells = df.shape[0] * df.shape[1]
 
@@ -94,14 +114,14 @@ def get_missing_percentage(df):
 
 
 def get_chart_dataframe(values):
-    """Convert an agent tool result into chart-ready data."""
+    """Convert agent tool results into chart-ready data."""
 
     if not isinstance(values, dict) or not values:
         return pd.DataFrame()
 
     chart_df = pd.DataFrame(
         {
-            "Category": list(values.keys()),
+            "Category": [str(k) for k in values.keys()],
             "Value": list(values.values()),
         }
     )
@@ -114,8 +134,8 @@ def get_chart_dataframe(values):
     return chart_df.dropna(subset=["Value"])
 
 
-def download_analysis(answer, question, history):
-    """Build a downloadable Markdown report."""
+def build_report(answer, question, history):
+    """Build a downloadable Markdown analysis report."""
 
     report = [
         "# AI Data Analyst Report",
@@ -134,9 +154,11 @@ def download_analysis(answer, question, history):
         report.append("No analysis tools were executed.")
 
     for index, step in enumerate(history, start=1):
+
         report.extend(
             [
-                f"### Step {index}: {step.get('tool', 'Unknown')}",
+                f"### Step {index}: "
+                f"{step.get('tool', 'Unknown')}",
                 "",
                 "**Arguments**",
                 "",
@@ -164,8 +186,12 @@ def download_analysis(answer, question, history):
     return "\n".join(report)
 
 
+# ============================================================
+# CHART VISUALISATIONS
+# ============================================================
+
 def show_tool_charts(history):
-    """Display charts generated from agent tool results."""
+    """Display charts from agent tool results."""
 
     chart_count = 0
 
@@ -189,16 +215,13 @@ def show_tool_charts(history):
         chart_count += 1
 
         tool_name = step.get("tool", "Analysis")
-
         metric = result.get("metric", "Value")
-
         aggregation = result.get("aggregation", "")
 
-        st.markdown(
-            f"#### {metric} by category"
-            if tool_name == "group_summary"
-            else f"#### {metric} over time"
-        )
+        if tool_name == "time_trend":
+            st.markdown(f"#### {metric} over time")
+        else:
+            st.markdown(f"#### {metric} by category")
 
         if aggregation:
             st.caption(
@@ -206,20 +229,26 @@ def show_tool_charts(history):
                 f"Aggregation: {aggregation}"
             )
 
-        # Allow the user to choose a visualisation.
+        default_chart = (
+            1 if tool_name == "time_trend" else 0
+        )
+
         chart_type = st.selectbox(
             "Chart type",
-            ["Bar chart", "Line chart", "Data table"],
-            index=(
-                1 if tool_name == "time_trend" else 0
-            ),
+            [
+                "Bar chart",
+                "Line chart",
+                "Data table",
+            ],
+            index=default_chart,
             key=f"chart_type_{index}",
         )
 
         if chart_type == "Bar chart":
 
             st.bar_chart(
-                chart_df.set_index("Category"),
+                chart_df,
+                x="Category",
                 y="Value",
                 horizontal=True,
                 sort=False,
@@ -229,7 +258,8 @@ def show_tool_charts(history):
         elif chart_type == "Line chart":
 
             st.line_chart(
-                chart_df.set_index("Category"),
+                chart_df,
+                x="Category",
                 y="Value",
                 width="stretch",
             )
@@ -250,21 +280,22 @@ def show_tool_charts(history):
                 hide_index=True,
             )
 
-        csv_data = chart_df.to_csv(index=False)
-
         st.download_button(
             label="Download chart data",
-            data=csv_data,
+            data=chart_df.to_csv(index=False),
             file_name=f"analysis_chart_{index + 1}.csv",
             mime="text/csv",
             key=f"download_chart_{index}",
         )
 
+        st.divider()
+
     if chart_count == 0:
+
         st.info(
             "No chart-ready results were returned. "
-            "Try asking a question involving a category "
-            "comparison or a time trend."
+            "Try asking a question involving category "
+            "comparisons or monthly trends."
         )
 
 
@@ -302,15 +333,24 @@ with st.sidebar:
         "Summarise the dataset.",
     ]
 
-    for example in examples:
+    for index, example in enumerate(examples):
+
         if st.button(
             example,
-            key=f"example_{example}",
+            key=f"example_{index}",
             width="stretch",
         ):
+
             st.session_state["question_input"] = example
+            st.session_state["analysis_result"] = None
+            st.rerun()
 
     st.divider()
+
+    if API_KEY_AVAILABLE:
+        st.success("Gemini API configured")
+    else:
+        st.warning("Gemini API key not configured")
 
     st.caption(
         "Powered by Google Gemini, Python, "
@@ -334,7 +374,7 @@ st.markdown(
 
 
 # ============================================================
-# FILE VALIDATION
+# FILE UPLOAD VALIDATION
 # ============================================================
 
 if uploaded is None:
@@ -360,7 +400,6 @@ if len(raw) > 5_000_000:
 
 
 try:
-
     df = load_csv(raw)
 
 except Exception as exc:
@@ -390,7 +429,6 @@ dataset_id = get_dataset_id(raw)
 if st.session_state.get("dataset_id") != dataset_id:
 
     st.session_state["dataset_id"] = dataset_id
-
     st.session_state["analysis_result"] = None
 
 
@@ -401,7 +439,6 @@ if st.session_state.get("dataset_id") != dataset_id:
 st.subheader("Dataset overview")
 
 rows = len(df)
-
 columns = len(df.columns)
 
 numeric_columns = len(
@@ -454,7 +491,7 @@ preview_tab, statistics_tab, quality_tab = st.tabs(
 with preview_tab:
 
     st.dataframe(
-        format_dataframe(df.head(100)),
+        df.head(100),
         width="stretch",
         hide_index=True,
     )
@@ -526,7 +563,7 @@ st.divider()
 st.subheader("Ask the AI Analyst")
 
 st.caption(
-    "Gemini selects the appropriate Pandas tools "
+    "Gemini selects appropriate Pandas tools "
     "and explains the results."
 )
 
@@ -558,17 +595,20 @@ analyse_clicked = st.button(
 
 if analyse_clicked:
 
+    st.session_state["analysis_result"] = None
+
     if not question.strip():
 
         st.warning(
             "Please enter a question first."
         )
 
-    elif not os.environ.get("GEMINI_API_KEY"):
+    elif not API_KEY_AVAILABLE:
 
         st.error(
-            "GEMINI_API_KEY is missing. "
-            "Set your API key before running the agent."
+            "Gemini API key is missing. "
+            "Configure GEMINI_API_KEY in Streamlit Cloud "
+            "Secrets or your local environment."
         )
 
     else:
@@ -585,6 +625,7 @@ if analyse_clicked:
                 )
 
                 st.session_state["analysis_result"] = {
+                    "dataset_id": dataset_id,
                     "question": question,
                     "answer": answer,
                     "history": history,
@@ -603,7 +644,7 @@ if analyse_clicked:
 
 analysis = st.session_state.get("analysis_result")
 
-if analysis:
+if analysis and analysis.get("dataset_id") == dataset_id:
 
     st.divider()
 
@@ -626,19 +667,11 @@ if analysis:
         ]
     )
 
-    # --------------------------------------------------------
-    # CHARTS
-    # --------------------------------------------------------
-
     with results_tab:
 
         show_tool_charts(
             analysis["history"]
         )
-
-    # --------------------------------------------------------
-    # AGENT TRACE
-    # --------------------------------------------------------
 
     with trace_tab:
 
@@ -662,7 +695,8 @@ if analysis:
             ):
 
                 with st.expander(
-                    f"Step {index}: {step.get('tool', 'Unknown')}",
+                    f"Step {index}: "
+                    f"{step.get('tool', 'Unknown')}",
                     expanded=(index == 1),
                 ):
 
@@ -686,7 +720,7 @@ if analysis:
 
     st.subheader("Export analysis")
 
-    report = download_analysis(
+    report = build_report(
         answer=analysis["answer"],
         question=analysis["question"],
         history=analysis["history"],
